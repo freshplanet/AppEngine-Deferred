@@ -1,0 +1,7 @@
+# compiled output
+*.pyc
+
+# eclipse
+*.project
+*.pydevproject
+*.settings
