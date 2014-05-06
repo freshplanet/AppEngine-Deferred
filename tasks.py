@@ -157,7 +157,7 @@ def _defer(queues, func, funcArgs, funcKwargs, countdown=None, eta=None, taskNam
     
     # We track which function is called so that it appears clearly in the App admin dash-board.
     # Note: if it's a class method, we only track the method name and not the class name.
-    url = "/_cb/deferred/%s/%s/run" % (getattr(func, '__module__', ''), getattr(func, '__name__', ''))
+    url = "/_cb/deferred/%s/%s" % (getattr(func, '__module__', ''), getattr(func, '__name__', ''))
     
     headers = {"Content-Type": "application/octet-stream"}
     
@@ -173,7 +173,7 @@ class DeferredHandler(webapp2.RequestHandler):
     # We don't care about country and name-space.
     _SKIP_HEADERS = {'x-appengine-country', 'x-appengine-queuename', 'x-appengine-taskname', 'x-appengine-current-namespace'}
     
-    def run(self, *args, **kwargs):
+    def post(self, *args, **kwargs):
         """ Executes a deferred task """
         # Add some task debug information.
         headers = []
