@@ -19,6 +19,10 @@ We also added a couple of features to it:
 - Improved logging in case of error
 - Possibility to tie it to a *background* module to optimize serving requests
 
+And some helpers:
+- isFromTaskQueue(): Check if we are currently running from a task queue
+- getRetryCount(): Returns the current number of times the current task is being retried
+- logAsRetried(): Depending on # of times the task is being retried, we will increase the logging level.
 
 Our module still makes use of the deferred exceptions types ```SingularTaskFailure``` and ```PermanentTaskFailure``` to be compatible with existing code.
 
