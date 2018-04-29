@@ -76,6 +76,8 @@ def addTask(queues, func, *args, **kwargs):
     countdown = kwargs.pop('_countdown', None)
     eta = kwargs.pop('_eta', None)
     target = kwargs.pop('_target', None)
+    transactional = kwargs.pop('_transactional', False)
+    retry_options = kwargs.pop('_retry_options', None)
     
     if not target and BACKGROUND_MODULE:
         # Tasks from the default module are executed into the background module.
@@ -87,7 +89,7 @@ def addTask(queues, func, *args, **kwargs):
     
     success = False
     try:
-        yield _defer(queues, func, args, kwargs, countdown, eta, taskName, target)
+        yield _defer(queues, func, args, kwargs, countdown, eta, taskName, target, transactional, retry_options)
         success = True
             
     except (taskqueue.TaskAlreadyExistsError, taskqueue.TombstonedTaskError):
@@ -141,7 +143,8 @@ def logAsRetried(message, *args, **kwargs):
     logging.log(level, message, *args, **kwargs)
 
 
-def _defer(queues, func, funcArgs, funcKwargs, countdown=None, eta=None, taskName=None, target=None):
+def _defer(queues, func, funcArgs, funcKwargs, countdown=None, eta=None, 
+           taskName=None, target=None, transactional=False, retry_options=None):
     """
     Our own implementation of deferred.defer.
     
@@ -162,9 +165,9 @@ def _defer(queues, func, funcArgs, funcKwargs, countdown=None, eta=None, taskNam
     headers = {"Content-Type": "application/octet-stream"}
     
     task = taskqueue.Task(payload=payload, target=target, url=url, headers=headers,
-                          countdown=countdown, eta=eta, name=taskName)
+                          countdown=countdown, eta=eta, name=taskName, retry_options=retry_options)
     
-    return task.add_async(queueName)
+    return task.add_async(queueName, transactional=transactional)
 
 
 class DeferredHandler(webapp2.RequestHandler):
