@@ -117,7 +117,7 @@ class _DeferredTaskEntity(ndb.Model):
     data = ndb.BlobProperty(required=True)
 
 
-def run_from_datastore(key_url_safe_id):
+def _run_from_datastore(key_url_safe_id):
     """Retrieves a task from the datastore and executes it.
 
     Args:
@@ -143,7 +143,7 @@ def run_from_datastore(key_url_safe_id):
         entity.key.delete()
         raise TypeError
     except deferred.SingularTaskFailure:
-        entity.key.delete()
+        # Don't delete entity here. Task should be retired in case of SingularTaskFailure
         raise deferred.SingularTaskFailure
     except deferred.PermanentTaskFailure:
         entity.key.delete()
@@ -185,6 +185,7 @@ def logAsRetried(message, *args, **kwargs):
     logging.log(level, message, *args, **kwargs)
 
 
+@ndb.tasklet
 def _defer(queues, func, funcArgs, funcKwargs, countdown=None, eta=None,
            taskName=None, target=None, transactional=False, retry_options=None, parent=None):
     """
@@ -196,6 +197,15 @@ def _defer(queues, func, funcArgs, funcKwargs, countdown=None, eta=None,
     - using cPickle instead of pickle
     - logging headers at DEBUG level instead of INFO
     """
+
+    yield _put_async(queues, func, funcArgs, funcKwargs, countdown, eta, taskName, target, transactional, retry_options,
+                     parent)
+
+
+@ndb.tasklet
+def _put_async(queues, func, funcArgs, funcKwargs, countdown=None, eta=None,
+               taskName=None, target=None, transactional=False, retry_options=None, parent=None):
+
     payload = _serialize(func, funcArgs, funcKwargs)
 
     queueName = random.choice(queues)
@@ -211,16 +221,12 @@ def _defer(queues, func, funcArgs, funcKwargs, countdown=None, eta=None,
                               countdown=countdown, eta=eta, name=taskName, retry_options=retry_options)
     except taskqueue.TaskTooLargeError:
         logging.info('Task Too Large. Storing payload in the data store')
-        if parent:
-            # In case if data store entity needs to be stored under any specific parent
-            key = _DeferredTaskEntity(data=payload, parent=parent).put()
-        else:
-            key = _DeferredTaskEntity(data=payload).put()
-        payload = _serialize(run_from_datastore, key.urlsafe(), {})
+        key = _DeferredTaskEntity(data=payload, parent=parent).put()
+        payload = _serialize(_run_from_datastore, key.urlsafe(), {})
         task = taskqueue.Task(payload=payload, target=target, url=url, headers=headers,
                               countdown=countdown, eta=eta, name=taskName, retry_options=retry_options)
 
-    return task.add_async(queueName, transactional=transactional)
+    yield task.add_async(queueName, transactional=transactional)
 
 
 class DeferredHandler(webapp2.RequestHandler):
@@ -252,7 +258,7 @@ class DeferredHandler(webapp2.RequestHandler):
                 return
 
             try:
-                if func.__name__ == 'run_from_datastore':
+                if func.__name__ == '_run_from_datastore':
                     func(args)
                 else:
                     func(*args, **kwds)
