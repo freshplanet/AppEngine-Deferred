@@ -45,12 +45,9 @@ BACKGROUND_MODULE = None
 @ndb.tasklet
 def addTask(queues, func, *args, **kwargs):
     """ Enqueue a task to execute the specified function call later from the task queue.
-
     Handle exceptions and dispatching to the right queue.
-
     @param queues: List of queues names. We will randomly select one to push the task into.
                     Can be 'default' to use default queues.
-
     @param func: The function to execute later
     @param _countdown: seconds to wait before calling the function
     @param _eta: timestamp defining when to call the function
@@ -63,7 +60,6 @@ def addTask(queues, func, *args, **kwargs):
     @param _retry_options: task queue retry options
     @param _parent: ndb Key instance, if provided, function payload will be stored in data store entity under this
     parent if the size of payload exceeds 100KB. Max size of payload could be 1MB otherwise data store will throw error
-
     @return: A Future that will yield True if the task could be enqueued.
     @rtype: ndb.Future
     """
@@ -110,44 +106,30 @@ def addTask(queues, func, *args, **kwargs):
 
 class _DeferredTaskEntity(ndb.Model):
     """Datastore representation of a deferred task.
-
     This is used in cases when the deferred task is too big to be included as
     payload with the task queue entry.
     """
     data = ndb.BlobProperty(required=True)
 
 
-def _run_from_datastore(key_url_safe_id):
+def _run_from_datastore(key):
     """Retrieves a task from the datastore and executes it.
-
     Args:
     key: The datastore key of a _DeferredTaskEntity storing the task.
     Returns:
     The return value of the function invocation.
     """
     logging.info('Retrieving function payload from data store')
-    key = ndb.Key(urlsafe=key_url_safe_id)
     entity = key.get()
     if not entity:
         logging.error("Datastore entity not found for key: %s", key)
         raise deferred.PermanentTaskFailure
     try:
-        try:
-            func, args, kwds = cPickle.loads(entity.data)
-        except Exception:
-            logging.exception("Permanent failure attempting to execute task")
-            raise deferred.PermanentTaskFailure
-        func(*args, **kwds)
+        _run(entity.data)
         entity.key.delete()
-    except TypeError:
-        entity.key.delete()
-        raise TypeError
-    except deferred.SingularTaskFailure:
-        # Don't delete entity here. Task should be retired in case of SingularTaskFailure
-        raise deferred.SingularTaskFailure
     except deferred.PermanentTaskFailure:
         entity.key.delete()
-        raise deferred.PermanentTaskFailure
+        raise
 
 
 def isFromTaskQueue(request=None):
@@ -190,22 +172,12 @@ def _defer(queues, func, funcArgs, funcKwargs, countdown=None, eta=None,
            taskName=None, target=None, transactional=False, retry_options=None, parent=None):
     """
     Our own implementation of deferred.defer.
-
     This allows:
     - using webapp2 as deferred handler and applying our middlewares
     - using task asynchronous API
     - using cPickle instead of pickle
     - logging headers at DEBUG level instead of INFO
     """
-
-    yield _put_async(queues, func, funcArgs, funcKwargs, countdown, eta, taskName, target, transactional, retry_options,
-                     parent)
-
-
-@ndb.tasklet
-def _put_async(queues, func, funcArgs, funcKwargs, countdown=None, eta=None,
-               taskName=None, target=None, transactional=False, retry_options=None, parent=None):
-
     payload = _serialize(func, funcArgs, funcKwargs)
 
     queueName = random.choice(queues)
@@ -221,13 +193,13 @@ def _put_async(queues, func, funcArgs, funcKwargs, countdown=None, eta=None,
                               countdown=countdown, eta=eta, name=taskName, retry_options=retry_options)
     except taskqueue.TaskTooLargeError:
         logging.info('Task Too Large. Storing payload in the data store')
-        key = _DeferredTaskEntity(data=payload, parent=parent).put()
-        payload = _serialize(_run_from_datastore, key.urlsafe(), {})
+        key = yield _DeferredTaskEntity(data=payload, parent=parent).put_async()
+        payload = _serialize(_run_from_datastore, [key], {})
         task = taskqueue.Task(payload=payload, target=target, url=url, headers=headers,
                               countdown=countdown, eta=eta, name=taskName, retry_options=retry_options)
 
-    yield task.add_async(queueName, transactional=transactional)
-
+    ret = yield task.add_async(queueName, transactional=transactional)
+    raise ndb.Return(ret)
 
 class DeferredHandler(webapp2.RequestHandler):
     # Queue & task name are already set in the request log.
@@ -252,19 +224,7 @@ class DeferredHandler(webapp2.RequestHandler):
         # Make sure we are called from the Task Queue (security)
         if isFromTaskQueue(self.request):
             try:
-                func, args, kwds = cPickle.loads(self.request.body)
-            except Exception:
-                logging.exception("Permanent failure attempting to execute task")
-                return
-
-            try:
-                if func.__name__ == '_run_from_datastore':
-                    func(args)
-                else:
-                    func(*args, **kwds)
-            except TypeError:
-                logging.debug("Deferred function arguments: %s %s", args, kwds)
-                raise
+                _run(self.request.body)
             except deferred.SingularTaskFailure as e:
                 msg = "Failure executing task, task retry forced"
                 if e.message:
@@ -278,15 +238,31 @@ class DeferredHandler(webapp2.RequestHandler):
             logging.critical('Detected an attempted XSRF attack: we are not executing from a task queue.')
             self.response.set_status(403)
 
+def _run(data):
+    """Unpickles and executes a task.
+    
+    Args:
+      data: A pickled tuple of (function, args, kwargs) to execute.
+    Returns:
+      The return value of the function invocation.
+    """
+    try:
+        func, args, kwds = cPickle.loads(data)
+    except Exception, e:
+        raise deferred.PermanentTaskFailure(e)
+    
+    try:
+        func(*args, **kwds)
+    except TypeError:
+        logging.debug("Deferred function arguments: %s %s", args, kwds)
+        raise
 
 # ===========================================================================
 # From google.appengine.ext.deferred.defer lib
 # ===========================================================================
 
-
 def _invokeMember(obj, memberName, *args, **kwargs):
     """Retrieves a member of an object, then calls it with the provided arguments.
-
     Args:
       obj: The object to operate on.
       membername: The name of the member to retrieve from ojb.
@@ -300,10 +276,8 @@ def _invokeMember(obj, memberName, *args, **kwargs):
 
 def _curry_callable(obj, args, kwargs):
     """Takes a callable and arguments and returns a task queue tuple.
-
     The returned tuple consists of (callable, args, kwargs), and can be pickled
     and unpickled safely.
-
     Args:
       obj: The callable to curry. See the module docstring for restrictions.
       args: Positional arguments to call the callable with.
@@ -332,7 +306,6 @@ def _curry_callable(obj, args, kwargs):
 
 def _serialize(obj, args, kwargs):
     """Serializes a callable into a format recognized by the deferred executor.
-
     Args:
       obj: The callable to serialize. See module docstring for restrictions.
       args: Positional arguments to call the callable with.
